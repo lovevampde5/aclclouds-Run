@@ -105,74 +105,44 @@ async function clickStartButton(page) {
   });
 }
 
-// 处理点击 Renew 后弹出的 "Anti-bot confirmation" 人机验证弹窗
-// 与登录页的验证码处理方式类似：模拟鼠标移动到复选框中心再点击，
-// 点击后等待网页 JS 自动完成验证，再检查是否有额外的确认按钮，
-// 最后等待弹窗消失。
+// ── 修改后的 handleAntiBotModal ──
 async function handleAntiBotModal(page) {
-  console.log('[人机验证] 检测续期弹窗...');
-  // 弹窗一般是点击 Renew 后瞬间出现，先等它渲染出来
-  await page.waitForTimeout(randInt(800, 1500));
+  console.log('[人机验证] 等待续期验证弹窗...');
 
-  const modalVisible = await page.evaluate(() => {
-    const text = document.body.innerText || '';
-    return text.includes('Anti-bot confirmation') || text.includes('I am not a robot');
-  });
-
-  if (!modalVisible) {
+  // 1️⃣ 等待弹窗真正出现（以其标题 id 为准）
+  try {
+    await page.waitForSelector('#renew-captcha-title', { timeout: 8000 });
+    console.log('[人机验证] 弹窗已出现');
+  } catch {
     console.log('[人机验证] 未检测到验证弹窗，跳过');
     return;
   }
 
-  console.log('[人机验证] 检测到验证弹窗，尝试点击复选框...');
-  const captchaBox = page.locator('text="I am not a robot"');
-  if (await captchaBox.count() > 0) {
-    const box = await captchaBox.first().boundingBox();
-    if (box) {
-      await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 10 });
-      await page.waitForTimeout(randInt(200, 400));
-      await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
-    } else {
-      await captchaBox.first().click();
-    }
-    console.log('[人机验证] 已点击复选框，等待验证...');
-    await page.waitForTimeout(randInt(3000, 5000));
-  } else {
-    console.log('[人机验证] 未找到复选框元素，尝试直接寻找确认按钮');
+  // 2️⃣ 定位复选框（直接用 role="checkbox" 的 div，不依赖具体语言）
+  const checkbox = page.locator('div[role="checkbox"]').first();
+  if ((await checkbox.count()) === 0) {
+    console.log('[人机验证] 未找到复选框');
+    return;
   }
 
+  // 3️⃣ 模拟点击复选框
+  console.log('[人机验证] 点击复选框...');
+  await checkbox.click();
+
+  // 4️⃣ 等待验证完成 -> 弹窗消失（最多等 15 秒）
+  try {
+    await page.waitForSelector('#renew-captcha-title', {
+      state: 'hidden',
+      timeout: 15000,
+    });
+    console.log('[人机验证] 弹窗已关闭，验证通过');
+  } catch {
+    console.log('[人机验证] 等待弹窗关闭超时，截图并继续尝试');
+    await saveScreenshot(page, 'debug-antibot-timeout.png');
+  }
+
+  // 保留原有截图（如果弹窗已消失可能截不到，但无害）
   await saveScreenshot(page, 'debug-antibot.png');
-
-  // 部分验证框在勾选通过后还会出现一个确认/提交按钮，尝试点一下
-  const confirmClicked = await page.evaluate(() => {
-    const keywords = ['Confirm', 'Verify', 'Submit', 'Continue', 'Confirmer', 'Valider'];
-    const buttons = Array.from(document.querySelectorAll('button'));
-    for (const btn of buttons) {
-      const t = (btn.textContent || '').trim();
-      if (keywords.some(k => t === k)) {
-        btn.click();
-        return t;
-      }
-    }
-    return null;
-  });
-  if (confirmClicked) {
-    console.log('[人机验证] 点击确认按钮:', confirmClicked);
-    await page.waitForTimeout(randInt(1000, 2000));
-  }
-
-  // 等待弹窗关闭（最多 15 秒）
-  for (let i = 0; i < 15; i++) {
-    const stillVisible = await page.evaluate(() =>
-      (document.body.innerText || '').includes('Anti-bot confirmation')
-    );
-    if (!stillVisible) {
-      console.log('[人机验证] 弹窗已关闭，验证通过');
-      return;
-    }
-    await page.waitForTimeout(1000);
-  }
-  console.log('[人机验证] 等待弹窗关闭超时，仍继续尝试后续流程');
 }
 
 // 检查容器电源状态，如果是 Offline 则点击开机，并发送通知
@@ -340,7 +310,7 @@ async function checkAndStartServer(page) {
       if (!btnText) throw new Error('未找到续期按钮');
       console.log('[续期] 点击:', btnText);
 
-      // 新增：处理点击 Renew 后弹出的人机验证弹窗
+      // 调用修改后的反机器人验证
       await handleAntiBotModal(page);
 
       // 等待 "Renewing..." 状态消失
