@@ -8,8 +8,7 @@ const TG_CHAT   = process.env.TG_CHAT_ID;
 const PROXY_SRV = 'socks5://127.0.0.1:1080';
 const BASE_URL  = 'https://dash.aclclouds.com';
 
-// 续期阈值(小时)：剩余时间 <= 此值才续期，> 此值则跳过
-const RENEW_THRESHOLD_HOURS = 48; // 2 天
+const RENEW_THRESHOLD_HOURS = 48;
 
 async function tgNotify(msg) {
   if (!TG_TOKEN || !TG_CHAT) { console.log('[TG] 未配置，跳过'); return; }
@@ -32,12 +31,26 @@ function parseHours(text) {
   return days * 24 + hours + mins / 60;
 }
 
+// 新增中文转换函数
+function formatTimeChinese(raw) {
+  if (!raw) return '未知';
+  return raw
+    .replace(/(\d+)\s*j/gi, '$1天')
+    .replace(/(\d+)\s*h/gi, '$1小时')
+    .replace(/(\d+)\s*min/gi, '$1分钟');
+}
+
 function extractTimeStr(raw) {
-  let m = raw.match(/\d+\s*[jd]\s*\d+\s*h\s*\d+\s*min/);
+  const t = raw || '';
+  let m = t.match(/\d+\s*[jd]\s*\d+\s*h\s*\d+\s*min/i);
   if (m) return m[0];
-  m = raw.match(/\d+\s*h\s*\d+\s*min/);
+  m = t.match(/\d+\s*[jd]\s*\d+\s*h\b/i);
   if (m) return m[0];
-  return raw.trim();
+  m = t.match(/\d+\s*h\s*\d+\s*min/i);
+  if (m) return m[0];
+  m = t.match(/\d+\s*h\b/i);
+  if (m) return m[0];
+  return '';
 }
 
 async function saveScreenshot(page, name) {
@@ -51,7 +64,6 @@ function randInt(min, max) {
   return Math.floor(Math.random() * (max - min + 1)) + min;
 }
 
-// 从页面提取剩余时间文字
 async function findTimeText(page) {
   return await page.evaluate(() => {
     const keywords = ['Time remaining', 'Temps restant'];
@@ -69,14 +81,12 @@ async function findTimeText(page) {
   });
 }
 
-// 读取顶部电源状态徽章文字（精确匹配 "Offline" / "Online" 等，
-// 与右侧 "STATUS / UPTIME" 面板里的大写 "OFFLINE" 区分开）
 async function findPowerStatus(page) {
   return await page.evaluate(() => {
     const knownStates = ['Offline', 'Online', 'Running', 'Starting', 'Stopping', 'Restarting'];
     const allEls = Array.from(document.querySelectorAll('span, div, p, button'));
     for (const el of allEls) {
-      if (el.children.length > 0) continue; // 只看纯文本叶子节点
+      if (el.children.length > 0) continue;
       const text = (el.textContent || '').trim();
       if (knownStates.includes(text)) {
         return text;
@@ -86,7 +96,6 @@ async function findPowerStatus(page) {
   });
 }
 
-// 检测到 Offline 时点击 Start 按钮
 async function clickStartButton(page) {
   return await page.evaluate(() => {
     const btn = document.querySelector('button.power-btn[data-variant="start"]');
@@ -94,7 +103,6 @@ async function clickStartButton(page) {
       btn.click();
       return true;
     }
-    // 兜底：按文字找
     const buttons = Array.from(document.querySelectorAll('button'));
     const fallback = buttons.find(b => (b.textContent || '').trim() === 'Start');
     if (fallback) {
@@ -105,11 +113,8 @@ async function clickStartButton(page) {
   });
 }
 
-// ── 修改后的 handleAntiBotModal ──
 async function handleAntiBotModal(page) {
   console.log('[人机验证] 等待续期验证弹窗...');
-
-  // 1️⃣ 等待弹窗真正出现（以其标题 id 为准）
   try {
     await page.waitForSelector('#renew-captcha-title', { timeout: 8000 });
     console.log('[人机验证] 弹窗已出现');
@@ -118,18 +123,15 @@ async function handleAntiBotModal(page) {
     return;
   }
 
-  // 2️⃣ 定位复选框（直接用 role="checkbox" 的 div，不依赖具体语言）
   const checkbox = page.locator('div[role="checkbox"]').first();
   if ((await checkbox.count()) === 0) {
     console.log('[人机验证] 未找到复选框');
     return;
   }
 
-  // 3️⃣ 模拟点击复选框
   console.log('[人机验证] 点击复选框...');
   await checkbox.click();
 
-  // 4️⃣ 等待验证完成 -> 弹窗消失（最多等 15 秒）
   try {
     await page.waitForSelector('#renew-captcha-title', {
       state: 'hidden',
@@ -141,11 +143,9 @@ async function handleAntiBotModal(page) {
     await saveScreenshot(page, 'debug-antibot-timeout.png');
   }
 
-  // 保留原有截图（如果弹窗已消失可能截不到，但无害）
   await saveScreenshot(page, 'debug-antibot.png');
 }
 
-// 检查容器电源状态，如果是 Offline 则点击开机，并发送通知
 async function checkAndStartServer(page) {
   console.log('[开机检测] 读取当前电源状态...');
   const status = await findPowerStatus(page);
@@ -169,7 +169,6 @@ async function checkAndStartServer(page) {
     return;
   }
 
-  // 等待 2~3 秒后再检查状态
   await page.waitForTimeout(randInt(2000, 3000));
   const newStatus = await findPowerStatus(page);
   console.log('[开机检测] 点击后状态:', newStatus);
@@ -211,12 +210,10 @@ async function checkAndStartServer(page) {
     const page = await ctx.newPage();
     page.setDefaultTimeout(60000);
 
-    // ── Step 1: 登录页 ──
     console.log('[1] 打开登录页...');
     await page.goto(BASE_URL + '/auth/login', { waitUntil: 'networkidle', timeout: 60000 });
     await saveScreenshot(page, 'debug-login.png');
 
-    // ── Step 2: 填邮箱密码 ──
     console.log('[2] 填写邮箱密码...');
     await page.waitForSelector('input[type="email"], #username', { timeout: 30000 });
 
@@ -228,11 +225,9 @@ async function checkAndStartServer(page) {
     await pwdInput.click();
     await page.keyboard.type(PASSWORD, { delay: randInt(50, 120) });
 
-    // ── Step 3: 模拟 UI 操作处理 Captcha ──
     console.log('[3] 尝试点击人机验证...');
     const captchaBox = page.locator('text="I am not a robot"');
     if (await captchaBox.count() > 0) {
-        // 模拟鼠标移动到验证码区域中心再点击
         const box = await captchaBox.first().boundingBox();
         if (box) {
             await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 10 });
@@ -242,31 +237,25 @@ async function checkAndStartServer(page) {
             await captchaBox.first().click();
         }
         console.log('[Captcha] 已点击，等待网页自动验证...');
-        // 等待网页内置 JS 运行并获取验证 Token
         await page.waitForTimeout(randInt(3500, 5000));
     } else {
         console.log('[Captcha] 未找到验证码复选框，尝试直接登录');
     }
 
-    // ── Step 4: 点击 Sign in 按钮 ──
     console.log('[4] 点击登录...');
     await page.locator('button:has-text("Sign in")').click();
 
-    // 等待登录完成跳转
     console.log('[5] 等待登录响应跳转...');
     try {
         await page.waitForNavigation({ waitUntil: 'networkidle', timeout: 15000 });
     } catch (e) {
-        // 如果网络已空闲但没跳转，下方检查错误即可
     }
 
-    // 检查是否有报错提示
     const pageText = await page.evaluate(() => document.body.innerText);
     if (pageText.includes('Captcha incorrect') || pageText.includes('These credentials do not match')) {
         throw new Error('登录失败: 验证码未通过或账号密码错误');
     }
 
-    // ── 访问服务器页面 ──
     const serverUrl = BASE_URL + '/server/' + SERVER_ID;
     console.log('[->] 跳转到:', serverUrl);
     await page.goto(serverUrl, { waitUntil: 'networkidle', timeout: 60000 });
@@ -274,10 +263,8 @@ async function checkAndStartServer(page) {
     await page.waitForTimeout(3000);
     await saveScreenshot(page, 'debug-server.png');
 
-    // ── 新增：检测容器电源状态，如果 Offline 则尝试开机 ──
     await checkAndStartServer(page);
 
-    // ── 等待并读取剩余时间 ──
     console.log('[等待] 查找剩余时间...');
     let remainRaw = null;
     for (let i = 0; i < 30; i++) {
@@ -294,7 +281,6 @@ async function checkAndStartServer(page) {
     if (remainHours <= RENEW_THRESHOLD_HOURS) {
       console.log('[续期] 剩余 <= 2 天，点击续期...');
 
-      // 点击续期按钮
       const btnText = await page.evaluate(() => {
         const keywords = ['Renouveler', 'Renew'];
         const buttons = Array.from(document.querySelectorAll('button, a'));
@@ -310,10 +296,8 @@ async function checkAndStartServer(page) {
       if (!btnText) throw new Error('未找到续期按钮');
       console.log('[续期] 点击:', btnText);
 
-      // 调用修改后的反机器人验证
       await handleAntiBotModal(page);
 
-      // 等待 "Renewing..." 状态消失
       console.log('[续期] 等待续期完成...');
       let newRemainRaw = null;
       for (let i = 0; i < 40; i++) {
@@ -357,7 +341,7 @@ async function checkAndStartServer(page) {
       await tgNotify(
         'ACLClouds 续期成功\n\n' +
         '服务器: ' + SERVER_ID + '\n' +
-        '续期前: ' + remainText.trim() + '\n' +
+        '续期前: ' + formatTimeChinese(remainText) + '\n' +   // ← 这里改成中文
         '续期后: ' + newDays + ' 天 ' + newHrs + ' 小时\n\n' +
         '时间: ' + new Date().toISOString()
       );
